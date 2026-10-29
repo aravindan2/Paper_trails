@@ -1,1 +1,6 @@
 /target
+
+# Private case-authoring documents (ground truth / answer key). These stay on
+# the development machine only; tests/answer_key.rs may reference the same
+# facts because test code is never part of a browser bundle.
+authoring/

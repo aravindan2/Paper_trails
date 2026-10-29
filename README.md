@@ -7,11 +7,12 @@ timeline.
 
 > The computer is the crime scene. Computer science is how you solve the crime.
 
-**Current status: Milestone 2 complete** — native CLI with a virtual
-filesystem, core commands, and a forensic toolkit (`stat`, `strings`,
-`hexdump`, `sha256sum`, `decode`). Case content is still placeholder
-scaffolding; mystery authoring, evidence tracking, WASM, and the web UI come
-in later milestones.
+**Current status: Milestone 3 complete** — native CLI with a virtual
+filesystem, core commands, a forensic toolkit (`stat`, `strings`, `hexdump`,
+`sha256sum`, `decode`), and the authored Case 001 investigation: a complete
+evidence registry, objectives, chronological timeline, and a transparent
+report evaluator (`evidence` / `timeline` / `submit`). WASM bindings, the web
+UI, and deployment come in later milestones.
 
 ## Repository layout
 
@@ -22,24 +23,29 @@ paper_trails/
 │   └── game-core/          # shared engine (WASM-ready)
 │       ├── Cargo.toml      # one dependency: sha2 (real SHA-256)
 │       ├── src/
-│       │   ├── lib.rs      # module map + re-exports
-│       │   ├── vfs.rs      # virtual filesystem + path normalization
-│       │   ├── command.rs  # tokenizer + typed command parsing
-│       │   ├── engine.rs   # command execution + player state
-│       │   ├── forensics.rs# strings/hexdump/SHA-256/decode (pure functions)
-│       │   └── case.rs     # Case 001 scaffolding assets (placeholder)
+│       │   ├── lib.rs          # module map + re-exports
+│       │   ├── vfs.rs          # virtual filesystem + path normalization
+│       │   ├── command.rs      # tokenizer + typed command parsing
+│       │   ├── engine.rs       # command execution + player state
+│       │   ├── forensics.rs    # strings/hexdump/SHA-256/decode (pure functions)
+│       │   ├── investigation.rs# evidence/discovery/objective/report mechanics
+│       │   └── case.rs         # Case 001 artifacts + evidence definitions
 │       └── tests/
-│           └── session.rs  # end-to-end player session tests
+│           ├── session.rs      # end-to-end player session tests
+│           ├── investigation.rs# discovery/journal/report mechanics
+│           └── answer_key.rs   # solution + consistency + separation tests
 ├── apps/
 │   └── cli/                # thin native adapter (stdin → engine → stdout)
 │       └── src/main.rs
-├── tests/                  # (workspace-level tests added in later milestones)
 └── README.md
 ```
 
 The engine lives in `crates/game-core` and knows nothing about terminals or
 browsers, so the same crate backs both the native CLI and the future WASM
-build.
+build. Private case-authoring documents live in a gitignored `authoring/`
+directory on the development machine only; solution-dependent *test* code
+(`tests/answer_key.rs`) may know the answer because tests are never part of a
+browser bundle.
 
 ## Build, test, and run
 
@@ -76,19 +82,64 @@ Type `help` at the prompt, then navigate and search. `Ctrl-D` exits.
 | `hexdump PATH` | hex + ASCII dump, 16 bytes per row, `hexdump -C` style |
 | `sha256sum PATH` | real SHA-256 digest of the file's bytes |
 | `decode hex\|base64 VALUE` | decode hex or standard base64 text |
+| `evidence` | list recorded observations and case objectives |
+| `timeline` | show dated observations in chronological order, with sources |
+| `submit who\|did\|why TEXT` | record one line of your final report |
+| `submit` | evaluate the recorded report |
 
 ### Examples
 
 ```text
 stat /opt/atlas/engine.bin
 hexdump /opt/atlas/engine.bin
-strings -n 3 /opt/atlas/engine.bin
+strings -n 30 /opt/atlas/engine.bin
 sha256sum /opt/atlas/engine.bin
 grep -n "Accepted password" /var/log/auth.log
 decode hex 68656c6c6f                → hello
 decode base64 aGVsbG8=               → hello
 decode hex fffe                      → (bytes) ff fe
+evidence
+timeline
+submit did <what you think was changed>
+submit
 ```
+
+## Investigation
+
+Case 001 ships a complete authored mystery: roughly fifteen artifacts across
+the virtual filesystem — system logs, a source repository with git history,
+release documentation, an installed binary, and personal files — plus a
+registry of eight observations, four objectives, and a report evaluator.
+
+### How evidence is recorded
+
+Evidence is recorded when a command actually **surfaces the relevant content
+to you**: displaying the matching line with `cat` or `grep`, showing the
+artifact's metadata with `stat`, extracting the run with `strings` or
+`hexdump`, or decoding the registered value. Running a command against the
+wrong file — or one that filters the content out (e.g. an over-high
+`strings -n`) — records nothing. Each observation is recorded at most once;
+repeating an inspection is silent. Successful discoveries append notices like
+`evidence recorded: EV-00X — Title` and `objective complete: OBJ-00X — Title`
+to the command's output, and `evidence` shows the journal with sources and
+cross-references.
+
+### How reports are evaluated
+
+`submit who|did|why TEXT` records (or revises) a report field; bare `submit`
+evaluates. The evaluator prints:
+
+- an evidence line — `N of M recorded (K required — key observations
+  covered|missing)`,
+- one status per field — `not recorded — use: submit X TEXT`,
+  `does not match the evidence you have recorded`, or `ok`,
+- a verdict — `ACCEPTED` or `INCOMPLETE`.
+
+Evaluation runs entirely in the client (report text never leaves the process;
+evaluation must work offline in the browser). It is deliberately transparent
+and generous: any reasonable wording of the supported explanation passes —
+the evidence gate does the heavy lifting, and incomplete feedback says what
+is missing without ever revealing the answer.
 
 ### Documented subset (intentional differences from Unix tools)
 
@@ -162,11 +213,28 @@ decode hex fffe                      → (bytes) ff fe
    in-crate UTC formatter, sorted directory listings, fixed-width hex dump
    rows — no chrono, no local-timezone surprises.
 7. **`CommandOutput` is the state-change channel.** Evidence discoveries and
-   objective updates attach to `execute()` in Milestone 3 without changing the
-   adapter contract.
-8. **Placeholder case content is labeled.** `crates/game-core/src/case.rs`
-   marks every file as scaffolding; no story facts are committed yet. Final
-   case data becomes data-driven and the answer key stays out of public assets.
+   objective completions append notice lines to the same output the adapter
+   already prints — the CLI (and later the browser) needs no new plumbing.
+8. **Discovery is content-based, not command-based.** Each finished command
+   reports what it surfaced (an `Inspection`: displayed text/lines, extracted
+   runs, shown metadata, decoded value); triggers match against that content
+   on the resolved path. Merely running the right *command* never records
+   anything the player did not see.
+9. **Case definitions are data.** `case.rs` registers artifacts, evidence,
+   objectives, and grading rules as statics; `investigation.rs` is
+   case-agnostic, and `GameEngine::with_case` can load future cases. The
+   unit-test sandbox (`GameEngine::new`) loads no case at all, which keeps
+   engine mechanics tests independent of story content.
+10. **Grading is transparent and evidence-backed.** `submit` uses documented
+    keyword checks (case-insensitive, generously worded) *plus* an evidence
+    sufficiency gate, and always reports per-field status. Evaluation runs in
+    the client by design (offline browser play); nothing relies on
+    client-side secrecy.
+11. **The answer key stays out of shipped material.** The ground-truth
+    narrative lives in the gitignored `authoring/` directory; solution
+    knowledge is confined to development-only tests (`tests/answer_key.rs`);
+    public case assets carry the mystery's *facts* but never its solution
+    prose. A test enforces all of this — including a spoiler-free README.
 
 ## Testing
 
@@ -181,14 +249,22 @@ output, `strings` boundary conditions (empty files, all-binary inputs, run
 lengths), `hexdump` formatting verified byte-for-byte against system
 `hexdump -C` output, SHA-256 against FIPS and cross-tool vectors, hex/base64
 decode success and every rejection path, exact session outputs, and
-case-image structure. Case-solution tests (later milestones) stay separate
-from public case assets.
+case-image structure — plus the investigation layer:
+
+- **`tests/investigation.rs`** — discovery conditions (irrelevant actions
+  record nothing; content-based triggers do), duplicate discovery is silent,
+  journal/timeline output formats, objective completion, and report
+  recording/evaluation for missing, unsupported, empty, and malformed input.
+- **`tests/answer_key.rs`** — solution-dependent, development-only: a full
+  clean-state progression to all eight observations and four objectives,
+  accepted/incomplete/unsupported report verdicts, artifact ↔ timeline
+  consistency (timestamps, reflog epochs, digests pinned against ground
+  truth), and the answer-key separation checks (no solution text in case
+  assets, authoring docs gitignored and outside the shipped trees,
+  spoiler-free README).
 
 ## What remains (next milestones)
 
-- **Milestone 3 — Case 001:** author the real artifacts and timeline, evidence
-  registry, objectives, `evidence`/`timeline`/`submit`, solution tests kept
-  separate from public assets.
 - **Milestone 4 — WASM:** thin `wasm-bindgen` adapter, `wasm-pack` build,
   native/browser parity checks.
 - **Milestone 5 — Web terminal UI:** keyboard-first terminal, history,

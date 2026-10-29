@@ -14,6 +14,38 @@ pub enum Encoding {
     Base64,
 }
 
+/// Which part of the final report a `submit FIELD TEXT` line records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportField {
+    /// Who is responsible for the change.
+    Who,
+    /// What was changed / how.
+    Did,
+    /// Why it was done.
+    Why,
+}
+
+impl ReportField {
+    /// The field name as typed by the player (`submit who ...`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReportField::Who => "who",
+            ReportField::Did => "did",
+            ReportField::Why => "why",
+        }
+    }
+
+    /// Parse a `submit` field name (case-insensitive), or `None`.
+    pub fn from_token(token: &str) -> Option<ReportField> {
+        match token.to_ascii_lowercase().as_str() {
+            "who" => Some(ReportField::Who),
+            "did" => Some(ReportField::Did),
+            "why" => Some(ReportField::Why),
+            _ => None,
+        }
+    }
+}
+
 /// A parsed command with validated arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -50,6 +82,17 @@ pub enum Command {
         encoding: Encoding,
         value: String,
     },
+    /// List recorded evidence and case objectives.
+    Evidence,
+    /// Show dated evidence in chronological order.
+    Timeline,
+    /// `submit FIELD TEXT` — record one line of the final report.
+    SubmitField {
+        field: ReportField,
+        text: String,
+    },
+    /// Bare `submit` — evaluate the recorded report.
+    SubmitEvaluate,
 }
 
 /// Parse failures, rendered as terminal-style messages by `Display`.
@@ -82,6 +125,8 @@ pub enum ParseError {
         value: String,
         usage: &'static str,
     },
+    /// The `submit` FIELD operand is not `who`, `did`, or `why`.
+    UnknownSubmitField(String),
 }
 
 impl fmt::Display for ParseError {
@@ -122,6 +167,10 @@ impl fmt::Display for ParseError {
                 f,
                 "{command}: {option} expects {expects}, got '{value}'\nusage: {usage}"
             ),
+            ParseError::UnknownSubmitField(given) => write!(
+                f,
+                "submit: unknown field: {given}\nusage: {USAGE_SUBMIT} (or submit alone to evaluate)"
+            ),
         }
     }
 }
@@ -137,6 +186,7 @@ const USAGE_STRINGS: &str = "strings [-n LENGTH] PATH";
 const USAGE_HEXDUMP: &str = "hexdump PATH";
 const USAGE_SHA256SUM: &str = "sha256sum PATH";
 const USAGE_DECODE: &str = "decode hex|base64 VALUE";
+const USAGE_SUBMIT: &str = "submit who|did|why TEXT";
 
 /// Split input into tokens. Whitespace separates tokens unless it appears
 /// inside single or double quotes. An unterminated quote is an error.
@@ -221,6 +271,9 @@ impl Command {
             "sha256sum" => one_operand("sha256sum", USAGE_SHA256SUM, rest)
                 .map(|path| Command::Sha256Sum { path }),
             "decode" => parse_decode(rest),
+            "evidence" => no_operands("evidence", rest),
+            "timeline" => no_operands("timeline", rest),
+            "submit" => parse_submit(rest),
             other => Err(ParseError::UnknownCommand(other.to_string())),
         }
     }
@@ -335,10 +388,34 @@ fn parse_decode(rest: &[String]) -> Result<Command, ParseError> {
     }
 }
 
+/// `submit` (evaluate), `submit FIELD TEXT` (record one field). Remaining
+/// words after the field name are joined with single spaces, so quoting is
+/// optional: `submit did enabled the export` works.
+fn parse_submit(rest: &[String]) -> Result<Command, ParseError> {
+    let Some((first, tail)) = rest.split_first() else {
+        return Ok(Command::SubmitEvaluate);
+    };
+    let Some(field) = ReportField::from_token(first) else {
+        return Err(ParseError::UnknownSubmitField(first.clone()));
+    };
+    if tail.is_empty() {
+        return Err(ParseError::MissingOperand {
+            command: "submit",
+            usage: USAGE_SUBMIT,
+        });
+    }
+    Ok(Command::SubmitField {
+        field,
+        text: tail.join(" "),
+    })
+}
+
 fn no_operands(command: &'static str, rest: &[String]) -> Result<Command, ParseError> {
     if rest.is_empty() {
         Ok(match command {
             "help" => Command::Help,
+            "evidence" => Command::Evidence,
+            "timeline" => Command::Timeline,
             _ => Command::Pwd,
         })
     } else {
@@ -740,6 +817,65 @@ mod tests {
                 command: "decode",
                 usage: USAGE_DECODE
             })
+        );
+    }
+
+    #[test]
+    fn parses_investigation_commands() {
+        assert_eq!(Command::parse("evidence").unwrap(), Command::Evidence);
+        assert_eq!(Command::parse("timeline").unwrap(), Command::Timeline);
+        assert_eq!(Command::parse("submit").unwrap(), Command::SubmitEvaluate);
+        assert_eq!(
+            Command::parse("submit who dreyes").unwrap(),
+            Command::SubmitField {
+                field: ReportField::Who,
+                text: "dreyes".to_string()
+            }
+        );
+        // Field names are case-insensitive and remaining words are joined.
+        assert_eq!(
+            Command::parse("submit DID enabled the export").unwrap(),
+            Command::SubmitField {
+                field: ReportField::Did,
+                text: "enabled the export".to_string()
+            }
+        );
+        // Quoted text survives as a single field value too.
+        assert_eq!(
+            Command::parse("submit why 'for the pilot'").unwrap(),
+            Command::SubmitField {
+                field: ReportField::Why,
+                text: "for the pilot".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_investigation_commands() {
+        assert_eq!(
+            Command::parse("evidence extra"),
+            Err(ParseError::TooManyArgs {
+                command: "evidence",
+                usage: "evidence"
+            })
+        );
+        assert_eq!(
+            Command::parse("timeline now"),
+            Err(ParseError::TooManyArgs {
+                command: "timeline",
+                usage: "timeline"
+            })
+        );
+        assert_eq!(
+            Command::parse("submit who"),
+            Err(ParseError::MissingOperand {
+                command: "submit",
+                usage: USAGE_SUBMIT
+            })
+        );
+        assert_eq!(
+            Command::parse("submit when it happened"),
+            Err(ParseError::UnknownSubmitField("when".to_string()))
         );
     }
 

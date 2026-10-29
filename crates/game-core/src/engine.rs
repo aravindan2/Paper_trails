@@ -2,12 +2,16 @@
 //!
 //! This is the shared core used by both the native CLI and (later) the WASM
 //! adapter. It parses input into a typed [`Command`], executes it against the
-//! virtual filesystem, and returns a [`CommandOutput`]. Evidence discovery and
-//! objective tracking will attach to the same execute call in a later
-//! milestone; `CommandOutput` is the extension point for those state changes.
+//! virtual filesystem, and returns a [`CommandOutput`]. When a case is loaded,
+//! the same `execute()` call records evidence discoveries and objective
+//! completions from what the command actually surfaced ([`Inspection`]) and
+//! appends notice lines to the output — the adapter contract never changes.
 
-use crate::command::{Command, Encoding, ParseError};
+use crate::command::{Command, Encoding, ParseError, ReportField};
 use crate::forensics;
+use crate::investigation::{
+    CaseDef, EvidenceDef, FieldStatus, Inspection, Report, evaluate, record_discoveries,
+};
 use crate::vfs::{EntryKind, VfsError, VirtualFs, format_timestamp};
 
 /// Mutable player-facing state that persists across commands.
@@ -15,12 +19,21 @@ use crate::vfs::{EntryKind, VfsError, VirtualFs, format_timestamp};
 pub struct GameState {
     /// Current working directory (always normalized, starts at `/`).
     pub cwd: String,
+    /// Discovered evidence IDs in discovery order (each recorded once).
+    pub discovered_evidence: Vec<String>,
+    /// Completed objective IDs, in completion order.
+    pub completed_objectives: Vec<String>,
+    /// Final report fields recorded via `submit FIELD TEXT`.
+    pub report: Report,
 }
 
 impl Default for GameState {
     fn default() -> Self {
         GameState {
             cwd: "/".to_string(),
+            discovered_evidence: Vec::new(),
+            completed_objectives: Vec::new(),
+            report: Report::default(),
         }
     }
 }
@@ -60,9 +73,17 @@ Forensic tools
   sha256sum PATH           print the SHA-256 digest of a file
   decode hex|base64 VALUE  decode hex or standard base64 text
 
+Investigation
+  evidence                   list recorded evidence and case objectives
+  timeline                   show dated evidence in chronological order
+  submit who|did|why TEXT    record a line of your final report
+  submit                     evaluate the report you have recorded
+
 Notes
   - Every path lives inside the simulated case filesystem. The host
     operating system is never read or executed.
+  - Observations are recorded when a command actually surfaces relevant
+    case content; run `evidence` to review your journal at any time.
   - grep searches a single file (directories are not searched yet).
   - Paths that climb above / with `..` are rejected as traversal attempts.
   - Quotes group arguments, e.g.: grep -n \"failed login\" /var/log/auth.log
@@ -74,20 +95,39 @@ Notes
 pub struct GameEngine {
     vfs: VirtualFs,
     state: GameState,
+    /// Investigation definitions of the loaded case, if any. [`GameEngine::new`]
+    /// builds a case-less sandbox (navigation/forensics only, used by unit
+    /// tests); [`GameEngine::case_001`] loads Case 001 with its full registry.
+    case: Option<CaseDef>,
 }
 
 impl GameEngine {
-    /// Build an engine over a prepared virtual filesystem.
+    /// Build an engine over a prepared virtual filesystem with no case loaded.
     pub fn new(vfs: VirtualFs) -> Self {
         GameEngine {
             vfs,
             state: GameState::default(),
+            case: None,
         }
     }
 
-    /// Build the engine loaded with the current Case 001 scaffolding image.
+    /// Build an engine over a virtual filesystem plus a case definition.
+    pub fn with_case(vfs: VirtualFs, case: CaseDef) -> Self {
+        GameEngine {
+            vfs,
+            state: GameState::default(),
+            case: Some(case),
+        }
+    }
+
+    /// Build the engine loaded with Case 001.
     pub fn case_001() -> Self {
-        Self::new(crate::case::case_001_fs())
+        Self::with_case(crate::case::case_001_fs(), crate::case::CASE_001)
+    }
+
+    /// The loaded case definition, if any.
+    pub fn case(&self) -> Option<CaseDef> {
+        self.case
     }
 
     pub fn state(&self) -> &GameState {
@@ -99,9 +139,31 @@ impl GameEngine {
     }
 
     /// Execute one line of player input. Never touches the host system.
+    ///
+    /// After the command runs, any evidence and objectives it triggered are
+    /// recorded (once each) and reported as notice lines appended to `text`.
     pub fn execute(&mut self, input: &str) -> CommandOutput {
         match Command::parse(input) {
-            Ok(command) => self.run(command),
+            Ok(command) => {
+                let (text, inspections) = self.run(command);
+                let notices = match self.case {
+                    Some(case) => record_discoveries(
+                        &case,
+                        &mut self.state.discovered_evidence,
+                        &mut self.state.completed_objectives,
+                        &inspections,
+                    ),
+                    None => Vec::new(),
+                };
+                let mut text = text;
+                for notice in notices {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(&notice);
+                }
+                CommandOutput { text }
+            }
             Err(ParseError::EmptyInput) => CommandOutput::empty(),
             Err(err) => CommandOutput {
                 text: err.to_string(),
@@ -109,12 +171,14 @@ impl GameEngine {
         }
     }
 
-    fn run(&mut self, command: Command) -> CommandOutput {
-        let text = match command {
-            Command::Help => HELP.to_string(),
-            Command::Pwd => self.state.cwd.clone(),
-            Command::Ls { path } => self.cmd_ls(path.as_deref()),
-            Command::Cd { path } => self.cmd_cd(&path),
+    /// Run one command, returning its output text plus the inspections it
+    /// surfaced (empty for commands that reveal no case content).
+    fn run(&mut self, command: Command) -> (String, Vec<Inspection>) {
+        match command {
+            Command::Help => (HELP.to_string(), Vec::new()),
+            Command::Pwd => (self.state.cwd.clone(), Vec::new()),
+            Command::Ls { path } => (self.cmd_ls(path.as_deref()), Vec::new()),
+            Command::Cd { path } => (self.cmd_cd(&path), Vec::new()),
             Command::Cat { paths } => self.cmd_cat(&paths),
             Command::Grep {
                 pattern,
@@ -124,10 +188,15 @@ impl GameEngine {
             Command::Stat { path } => self.cmd_stat(&path),
             Command::Strings { path, min_length } => self.cmd_strings(&path, min_length),
             Command::Hexdump { path } => self.cmd_hexdump(&path),
-            Command::Sha256Sum { path } => self.cmd_sha256sum(&path),
+            Command::Sha256Sum { path } => (self.cmd_sha256sum(&path), Vec::new()),
             Command::Decode { encoding, value } => self.cmd_decode(encoding, &value),
-        };
-        CommandOutput { text }
+            Command::Evidence => (self.cmd_evidence(), Vec::new()),
+            Command::Timeline => (self.cmd_timeline(), Vec::new()),
+            Command::SubmitField { field, text } => {
+                (self.cmd_submit_record(field, &text), Vec::new())
+            }
+            Command::SubmitEvaluate => (self.cmd_submit_evaluate(), Vec::new()),
+        }
     }
 
     fn cmd_ls(&self, path: Option<&str>) -> String {
@@ -160,12 +229,23 @@ impl GameEngine {
         }
     }
 
-    fn cmd_cat(&self, paths: &[String]) -> String {
+    fn cmd_cat(&self, paths: &[String]) -> (String, Vec<Inspection>) {
         let mut out = String::new();
+        let mut inspections = Vec::new();
         for path in paths {
             match self.vfs.read(path, &self.state.cwd) {
                 Ok(file) => match std::str::from_utf8(&file.contents) {
-                    Ok(text) => out.push_str(text),
+                    Ok(text) => {
+                        out.push_str(text);
+                        // Only text actually displayed to the player counts
+                        // as an inspection; record it with its resolved path.
+                        if let Ok(resolved) = self.vfs.resolve(path, &self.state.cwd) {
+                            inspections.push(Inspection::Text {
+                                path: resolved,
+                                content: text.to_string(),
+                            });
+                        }
+                    }
                     Err(_) => {
                         out.push_str(&format!(
                             "cat: {path}: cannot display: not valid UTF-8 text\n"
@@ -175,48 +255,75 @@ impl GameEngine {
                 Err(err) => out.push_str(&format!("cat: {path}: {err}\n")),
             }
         }
-        out.trim_end_matches('\n').to_string()
+        (out.trim_end_matches('\n').to_string(), inspections)
     }
 
-    fn cmd_grep(&self, pattern: &str, path: &str, show_line_numbers: bool) -> String {
+    fn cmd_grep(
+        &self,
+        pattern: &str,
+        path: &str,
+        show_line_numbers: bool,
+    ) -> (String, Vec<Inspection>) {
         let file = match self.vfs.read(path, &self.state.cwd) {
             Ok(file) => file,
-            Err(err) => return format!("grep: {path}: {err}"),
+            Err(err) => return (format!("grep: {path}: {err}"), Vec::new()),
         };
-        let needle = pattern.as_bytes();
         match std::str::from_utf8(&file.contents) {
-            Ok(text) => text
-                .lines()
-                .enumerate()
-                .filter(|(_, line)| line.contains(pattern))
-                .map(|(index, line)| {
-                    let line = line.strip_suffix('\r').unwrap_or(line);
-                    if show_line_numbers {
-                        format!("{path}:{}:{line}", index + 1)
-                    } else {
-                        format!("{path}:{line}")
+            Ok(text) => {
+                let mut matched: Vec<(usize, String)> = Vec::new();
+                for (index, line) in text.lines().enumerate() {
+                    if line.contains(pattern) {
+                        let line = line.strip_suffix('\r').unwrap_or(line);
+                        matched.push((index, line.to_string()));
                     }
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
+                }
+                let out = matched
+                    .iter()
+                    .map(|(index, line)| {
+                        if show_line_numbers {
+                            format!("{path}:{}:{line}", index + 1)
+                        } else {
+                            format!("{path}:{line}")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                // Only the matched lines the player saw are inspected.
+                let inspections = if matched.is_empty() {
+                    Vec::new()
+                } else {
+                    match self.vfs.resolve(path, &self.state.cwd) {
+                        Ok(resolved) => vec![Inspection::Lines {
+                            path: resolved,
+                            lines: matched.into_iter().map(|(_, line)| line).collect(),
+                        }],
+                        Err(_) => Vec::new(),
+                    }
+                };
+                (out, inspections)
+            }
             Err(_) => {
                 // Non-UTF-8 content: only report whether the pattern occurs in
                 // the raw bytes, mirroring grep's "binary file matches".
+                let needle = pattern.as_bytes();
                 let found = needle.is_empty()
                     || file
                         .contents
                         .windows(needle.len())
                         .any(|window| window == needle);
-                if found {
+                let out = if found {
                     format!("grep: {path}: binary file matches")
                 } else {
                     String::new()
-                }
+                };
+                // A binary match never displays content, so nothing is
+                // inspected.
+                (out, Vec::new())
             }
         }
     }
 
-    fn cmd_stat(&self, path: &str) -> String {
+    fn cmd_stat(&self, path: &str) -> (String, Vec<Inspection>) {
         match self.vfs.stat(path, &self.state.cwd) {
             Ok(entry) => {
                 // Directories have derived metadata only: the filesystem does
@@ -230,29 +337,56 @@ impl GameEngine {
                         format_timestamp(entry.modified_at),
                     )
                 };
-                format!(
+                let text = format!(
                     "  Path: {path}\n  Type: {}\n  Size: {size}\n  Permissions: {:04o}\n  Modified: {modified}",
                     entry.kind, entry.permissions
-                )
+                );
+                let inspections = match self.vfs.resolve(path, &self.state.cwd) {
+                    Ok(resolved) => vec![Inspection::Meta { path: resolved }],
+                    Err(_) => Vec::new(),
+                };
+                (text, inspections)
             }
-            Err(err) => format!("stat: {path}: {err}"),
+            Err(err) => (format!("stat: {path}: {err}"), Vec::new()),
         }
     }
 
-    fn cmd_strings(&self, path: &str, min_length: usize) -> String {
+    fn cmd_strings(&self, path: &str, min_length: usize) -> (String, Vec<Inspection>) {
         let file = match self.vfs.read(path, &self.state.cwd) {
             Ok(file) => file,
-            Err(err) => return format!("strings: {path}: {err}"),
+            Err(err) => return (format!("strings: {path}: {err}"), Vec::new()),
         };
-        forensics::extract_strings(&file.contents, min_length).join("\n")
+        let runs = forensics::extract_strings(&file.contents, min_length);
+        let out = runs.join("\n");
+        // The printed runs are exactly what the player saw (a high `-n`
+        // therefore cannot trigger a discovery it filtered out).
+        let inspections = match self.vfs.resolve(path, &self.state.cwd) {
+            Ok(resolved) => vec![Inspection::Bytes {
+                path: resolved,
+                runs,
+            }],
+            Err(_) => Vec::new(),
+        };
+        (out, inspections)
     }
 
-    fn cmd_hexdump(&self, path: &str) -> String {
+    fn cmd_hexdump(&self, path: &str) -> (String, Vec<Inspection>) {
         let file = match self.vfs.read(path, &self.state.cwd) {
             Ok(file) => file,
-            Err(err) => return format!("hexdump: {path}: {err}"),
+            Err(err) => return (format!("hexdump: {path}: {err}"), Vec::new()),
         };
-        forensics::hexdump(&file.contents)
+        let out = forensics::hexdump(&file.contents);
+        // The ASCII gutter surfaces every printable run in the bytes, so the
+        // inspection carries the full run list regardless of row layout.
+        let runs = forensics::extract_strings(&file.contents, 1);
+        let inspections = match self.vfs.resolve(path, &self.state.cwd) {
+            Ok(resolved) => vec![Inspection::Bytes {
+                path: resolved,
+                runs,
+            }],
+            Err(_) => Vec::new(),
+        };
+        (out, inspections)
     }
 
     fn cmd_sha256sum(&self, path: &str) -> String {
@@ -264,15 +398,147 @@ impl GameEngine {
         format!("{}  {path}", forensics::sha256_hex(&file.contents))
     }
 
-    fn cmd_decode(&self, encoding: Encoding, value: &str) -> String {
+    fn cmd_decode(&self, encoding: Encoding, value: &str) -> (String, Vec<Inspection>) {
         let decoded = match encoding {
             Encoding::Hex => forensics::decode_hex(value),
             Encoding::Base64 => forensics::decode_base64(value),
         };
         match decoded {
-            Ok(bytes) => forensics::format_decoded(&bytes),
-            Err(err) => format!("decode: {err}"),
+            Ok(bytes) => {
+                let text = forensics::format_decoded(&bytes);
+                let inspections = vec![Inspection::Decoded { text: text.clone() }];
+                (text, inspections)
+            }
+            Err(err) => (format!("decode: {err}"), Vec::new()),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Investigation commands.
+    // -----------------------------------------------------------------------
+
+    fn cmd_evidence(&self) -> String {
+        let Some(case) = self.case else {
+            return "evidence: no case is loaded".to_string();
+        };
+        let mut out = format!(
+            "{} evidence: {} of {}",
+            case.id,
+            self.state.discovered_evidence.len(),
+            case.evidence.len()
+        );
+        if self.state.discovered_evidence.is_empty() {
+            out.push_str(
+                "\n\nNo evidence recorded yet. Examine the case artifacts to record observations.",
+            );
+        } else {
+            // Journal order: as discovered, not registry order.
+            for id in &self.state.discovered_evidence {
+                let Some(def) = case.evidence.iter().find(|item| item.id == id) else {
+                    continue;
+                };
+                out.push_str(&format!("\n\n{}  {}", def.id, def.title));
+                out.push_str(&format!("\n        {}", def.observation));
+                out.push_str(&format!("\n        source: {}", def.source));
+                if !def.related.is_empty() {
+                    out.push_str(&format!("\n        related: {}", def.related.join(", ")));
+                }
+            }
+        }
+        out.push_str("\n\nObjectives:");
+        for objective in case.objectives {
+            let mark = if self
+                .state
+                .completed_objectives
+                .iter()
+                .any(|done| done == objective.id)
+            {
+                "x"
+            } else {
+                " "
+            };
+            out.push_str(&format!("\n  [{mark}] {}", objective.title));
+        }
+        out
+    }
+
+    fn cmd_timeline(&self) -> String {
+        let Some(case) = self.case else {
+            return "timeline: no case is loaded".to_string();
+        };
+        // Discovered evidence that carries a timestamp, sorted chronologically
+        // (ties broken by ID for determinism), with source provenance.
+        let mut dated: Vec<(i64, &EvidenceDef)> = self
+            .state
+            .discovered_evidence
+            .iter()
+            .filter_map(|id| case.evidence.iter().find(|item| item.id == id))
+            .filter_map(|def| def.time.map(|time| (time, def)))
+            .collect();
+        dated.sort_by_key(|(time, def)| (*time, def.id));
+        let mut out = format!(
+            "{} timeline: {} dated event{}",
+            case.id,
+            dated.len(),
+            if dated.len() == 1 { "" } else { "s" }
+        );
+        if dated.is_empty() {
+            out.push_str("\n\nNo dated evidence recorded yet.");
+        } else {
+            for (time, def) in dated {
+                out.push_str(&format!(
+                    "\n{}  {}  ({})",
+                    format_timestamp(time),
+                    def.title,
+                    def.source
+                ));
+            }
+        }
+        out
+    }
+
+    fn cmd_submit_record(&mut self, field: ReportField, text: &str) -> String {
+        if self.case.is_none() {
+            return "submit: no case is loaded".to_string();
+        }
+        self.state.report.set(field, text.to_string());
+        format!("recorded {}: {}", field.as_str(), text)
+    }
+
+    fn cmd_submit_evaluate(&self) -> String {
+        let Some(case) = self.case else {
+            return "submit: no case is loaded".to_string();
+        };
+        let evaluation = evaluate(&case, &self.state.discovered_evidence, &self.state.report);
+        let key_note = if evaluation.key_observations_covered {
+            "— key observations covered"
+        } else {
+            "— key observations missing"
+        };
+        let mut out = format!(
+            "{} report evaluation\n\n  evidence: {} of {} recorded ({} required {key_note})",
+            case.id, evaluation.discovered, evaluation.total, evaluation.min_evidence
+        );
+        for assessment in &evaluation.fields {
+            let label = assessment.field.as_str();
+            let detail = match assessment.status {
+                FieldStatus::Missing => {
+                    format!("{label}: not recorded — use: submit {label} TEXT")
+                }
+                FieldStatus::Unsupported => {
+                    format!("{label}: does not match the evidence you have recorded")
+                }
+                FieldStatus::Ok => format!("{label}: ok"),
+            };
+            out.push_str(&format!("\n  {detail}"));
+        }
+        out.push_str("\n\n  verdict: ");
+        out.push_str(if evaluation.accepted {
+            "ACCEPTED — case reconstruction complete"
+        } else {
+            "INCOMPLETE — revise your report and gather more evidence"
+        });
+        out
     }
 }
 
@@ -512,9 +778,45 @@ mod tests {
             "hexdump",
             "sha256sum",
             "decode",
+            "evidence",
+            "timeline",
+            "submit",
         ] {
             assert!(help.contains(command), "help is missing {command}");
         }
+    }
+
+    #[test]
+    fn investigation_commands_require_a_loaded_case() {
+        let mut engine = engine();
+        // The sandbox engine (GameEngine::new) has no case definition.
+        assert_eq!(engine.case(), None);
+        assert_eq!(
+            engine.execute("evidence").text,
+            "evidence: no case is loaded"
+        );
+        assert_eq!(
+            engine.execute("timeline").text,
+            "timeline: no case is loaded"
+        );
+        assert_eq!(engine.execute("submit").text, "submit: no case is loaded");
+        assert_eq!(
+            engine.execute("submit who someone").text,
+            "submit: no case is loaded"
+        );
+        // Parse-level errors still surface without a case...
+        assert_eq!(
+            engine.execute("submit who").text,
+            "submit: missing operand\nusage: submit who|did|why TEXT"
+        );
+        assert_eq!(
+            engine.execute("submit when now").text,
+            "submit: unknown field: when\nusage: submit who|did|why TEXT (or submit alone to evaluate)"
+        );
+        // ...and no state ever changes in a sandbox.
+        assert!(engine.state().discovered_evidence.is_empty());
+        assert!(engine.state().completed_objectives.is_empty());
+        assert!(engine.state().report.is_empty());
     }
 
     #[test]
