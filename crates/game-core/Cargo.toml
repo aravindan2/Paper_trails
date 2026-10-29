@@ -1,0 +1,8 @@
+[package]
+name = "game-core"
+version = "0.1.0"
+edition = "2024"
+
+# No dependencies on purpose: Milestone 1 needs nothing beyond std, and the
+# engine must stay WASM-compatible (wasm32-unknown-unknown) later on.
+[dependencies]
