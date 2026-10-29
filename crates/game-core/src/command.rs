@@ -4,7 +4,15 @@
 //! Input is *never* handed to a host shell. Quoted arguments are supported
 //! (`"` and `'`); escape sequences inside quotes are not (documented subset).
 
+use crate::forensics::DEFAULT_STRINGS_MIN_LENGTH;
 use std::fmt;
+
+/// Encoding selected by the `decode` command's TYPE operand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Encoding {
+    Hex,
+    Base64,
+}
 
 /// A parsed command with validated arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +32,23 @@ pub enum Command {
         pattern: String,
         path: String,
         show_line_numbers: bool,
+    },
+    Stat {
+        path: String,
+    },
+    Strings {
+        path: String,
+        min_length: usize,
+    },
+    Hexdump {
+        path: String,
+    },
+    Sha256Sum {
+        path: String,
+    },
+    Decode {
+        encoding: Encoding,
+        value: String,
     },
 }
 
@@ -45,6 +70,16 @@ pub enum ParseError {
     UnknownOption {
         command: &'static str,
         option: String,
+        usage: &'static str,
+    },
+    /// The `decode` TYPE operand is not a supported encoding.
+    UnknownEncoding(String),
+    /// An option's value failed validation (e.g. `strings -n abc`).
+    BadOptionValue {
+        command: &'static str,
+        option: String,
+        expects: &'static str,
+        value: String,
         usage: &'static str,
     },
 }
@@ -73,6 +108,20 @@ impl fmt::Display for ParseError {
             } => {
                 write!(f, "{command}: unsupported option: {option}\nusage: {usage}")
             }
+            ParseError::UnknownEncoding(given) => write!(
+                f,
+                "decode: unknown encoding: {given}\nusage: decode hex|base64 VALUE"
+            ),
+            ParseError::BadOptionValue {
+                command,
+                option,
+                expects,
+                value,
+                usage,
+            } => write!(
+                f,
+                "{command}: {option} expects {expects}, got '{value}'\nusage: {usage}"
+            ),
         }
     }
 }
@@ -83,6 +132,11 @@ const USAGE_LS: &str = "ls [PATH]";
 const USAGE_CD: &str = "cd [PATH]";
 const USAGE_CAT: &str = "cat PATH...";
 const USAGE_GREP: &str = "grep [-n] PATTERN PATH";
+const USAGE_STAT: &str = "stat PATH";
+const USAGE_STRINGS: &str = "strings [-n LENGTH] PATH";
+const USAGE_HEXDUMP: &str = "hexdump PATH";
+const USAGE_SHA256SUM: &str = "sha256sum PATH";
+const USAGE_DECODE: &str = "decode hex|base64 VALUE";
 
 /// Split input into tokens. Whitespace separates tokens unless it appears
 /// inside single or double quotes. An unterminated quote is an error.
@@ -159,8 +213,125 @@ impl Command {
                 usage: USAGE_CAT,
             }),
             "grep" => parse_grep(rest),
+            "stat" => one_operand("stat", USAGE_STAT, rest).map(|path| Command::Stat { path }),
+            "strings" => parse_strings(rest),
+            "hexdump" => {
+                one_operand("hexdump", USAGE_HEXDUMP, rest).map(|path| Command::Hexdump { path })
+            }
+            "sha256sum" => one_operand("sha256sum", USAGE_SHA256SUM, rest)
+                .map(|path| Command::Sha256Sum { path }),
+            "decode" => parse_decode(rest),
             other => Err(ParseError::UnknownCommand(other.to_string())),
         }
+    }
+}
+
+/// `true` for flag-like tokens such as `-l`; a lone `-` is a plain operand.
+fn is_option(token: &str) -> bool {
+    token.starts_with('-') && token.len() > 1
+}
+
+/// Parse a command that takes exactly one PATH operand and no options.
+fn one_operand(
+    command: &'static str,
+    usage: &'static str,
+    rest: &[String],
+) -> Result<String, ParseError> {
+    if let Some(option) = rest.iter().find(|token| is_option(token)) {
+        return Err(ParseError::UnknownOption {
+            command,
+            option: option.clone(),
+            usage,
+        });
+    }
+    match rest {
+        [] => Err(ParseError::MissingOperand { command, usage }),
+        [path] => Ok(path.clone()),
+        _ => Err(ParseError::TooManyArgs { command, usage }),
+    }
+}
+
+/// `strings [-n LENGTH] PATH`. `-n` accepts a positive integer; its value may
+/// appear before or after the PATH operand.
+fn parse_strings(rest: &[String]) -> Result<Command, ParseError> {
+    let mut min_length = DEFAULT_STRINGS_MIN_LENGTH;
+    let mut operands: Vec<&String> = Vec::new();
+    let mut index = 0;
+    while index < rest.len() {
+        let token = &rest[index];
+        if token == "-n" {
+            let Some(value) = rest.get(index + 1) else {
+                return Err(ParseError::MissingOperand {
+                    command: "strings",
+                    usage: USAGE_STRINGS,
+                });
+            };
+            min_length = value
+                .parse::<usize>()
+                .ok()
+                .filter(|parsed| *parsed >= 1)
+                .ok_or_else(|| ParseError::BadOptionValue {
+                    command: "strings",
+                    option: "-n".to_string(),
+                    expects: "a positive integer",
+                    value: value.clone(),
+                    usage: USAGE_STRINGS,
+                })?;
+            index += 2;
+        } else if is_option(token) {
+            return Err(ParseError::UnknownOption {
+                command: "strings",
+                option: token.clone(),
+                usage: USAGE_STRINGS,
+            });
+        } else {
+            operands.push(token);
+            index += 1;
+        }
+    }
+    match operands.as_slice() {
+        [path] => Ok(Command::Strings {
+            path: (*path).clone(),
+            min_length,
+        }),
+        [] => Err(ParseError::MissingOperand {
+            command: "strings",
+            usage: USAGE_STRINGS,
+        }),
+        _ => Err(ParseError::TooManyArgs {
+            command: "strings",
+            usage: USAGE_STRINGS,
+        }),
+    }
+}
+
+/// `decode TYPE VALUE`. TYPE is matched case-insensitively against the
+/// supported encodings.
+fn parse_decode(rest: &[String]) -> Result<Command, ParseError> {
+    let Some((kind, tail)) = rest.split_first() else {
+        return Err(ParseError::MissingOperand {
+            command: "decode",
+            usage: USAGE_DECODE,
+        });
+    };
+    let encoding = match kind.to_ascii_lowercase().as_str() {
+        "hex" => Encoding::Hex,
+        "base64" => Encoding::Base64,
+        _ => return Err(ParseError::UnknownEncoding(kind.clone())),
+    };
+    match tail {
+        [value] => Ok(Command::Decode {
+            encoding,
+            value: value.clone(),
+        }),
+        [] => Err(ParseError::MissingOperand {
+            command: "decode",
+            usage: USAGE_DECODE,
+        }),
+        _ => Err(ParseError::TooManyArgs {
+            command: "decode",
+            usage: USAGE_DECODE,
+        }),
     }
 }
 
@@ -361,6 +532,213 @@ mod tests {
             Err(ParseError::MissingOperand {
                 command: "grep",
                 usage: USAGE_GREP
+            })
+        );
+    }
+
+    #[test]
+    fn parses_forensic_commands() {
+        assert_eq!(
+            Command::parse("stat /home/elias/note.txt").unwrap(),
+            Command::Stat {
+                path: "/home/elias/note.txt".to_string()
+            }
+        );
+        assert_eq!(
+            Command::parse("hexdump /opt/atlas/engine.bin").unwrap(),
+            Command::Hexdump {
+                path: "/opt/atlas/engine.bin".to_string()
+            }
+        );
+        assert_eq!(
+            Command::parse("sha256sum auth.log").unwrap(),
+            Command::Sha256Sum {
+                path: "auth.log".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_strings_option() {
+        assert_eq!(
+            Command::parse("strings /opt/atlas/engine.bin").unwrap(),
+            Command::Strings {
+                path: "/opt/atlas/engine.bin".to_string(),
+                min_length: 4
+            }
+        );
+        assert_eq!(
+            Command::parse("strings -n 6 /opt/atlas/engine.bin").unwrap(),
+            Command::Strings {
+                path: "/opt/atlas/engine.bin".to_string(),
+                min_length: 6
+            }
+        );
+        // Option after the operand is also accepted.
+        assert_eq!(
+            Command::parse("strings /opt/atlas/engine.bin -n 1").unwrap(),
+            Command::Strings {
+                path: "/opt/atlas/engine.bin".to_string(),
+                min_length: 1
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_bad_strings_options() {
+        assert_eq!(
+            Command::parse("strings -n 0 file"),
+            Err(ParseError::BadOptionValue {
+                command: "strings",
+                option: "-n".to_string(),
+                expects: "a positive integer",
+                value: "0".to_string(),
+                usage: USAGE_STRINGS
+            })
+        );
+        assert_eq!(
+            Command::parse("strings -n abc file"),
+            Err(ParseError::BadOptionValue {
+                command: "strings",
+                option: "-n".to_string(),
+                expects: "a positive integer",
+                value: "abc".to_string(),
+                usage: USAGE_STRINGS
+            })
+        );
+        // Values that overflow usize fail parsing instead of panicking.
+        assert_eq!(
+            Command::parse("strings -n 99999999999999999999999999 file").unwrap_err(),
+            ParseError::BadOptionValue {
+                command: "strings",
+                option: "-n".to_string(),
+                expects: "a positive integer",
+                value: "99999999999999999999999999".to_string(),
+                usage: USAGE_STRINGS
+            }
+        );
+        assert_eq!(
+            Command::parse("strings -n"),
+            Err(ParseError::MissingOperand {
+                command: "strings",
+                usage: USAGE_STRINGS
+            })
+        );
+        assert_eq!(
+            Command::parse("strings -t x file"),
+            Err(ParseError::UnknownOption {
+                command: "strings",
+                option: "-t".to_string(),
+                usage: USAGE_STRINGS
+            })
+        );
+        assert_eq!(
+            Command::parse("strings"),
+            Err(ParseError::MissingOperand {
+                command: "strings",
+                usage: USAGE_STRINGS
+            })
+        );
+        assert_eq!(
+            Command::parse("strings a b"),
+            Err(ParseError::TooManyArgs {
+                command: "strings",
+                usage: USAGE_STRINGS
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_bad_stat_hexdump_sha256sum_args() {
+        assert_eq!(
+            Command::parse("stat"),
+            Err(ParseError::MissingOperand {
+                command: "stat",
+                usage: USAGE_STAT
+            })
+        );
+        assert_eq!(
+            Command::parse("stat a b"),
+            Err(ParseError::TooManyArgs {
+                command: "stat",
+                usage: USAGE_STAT
+            })
+        );
+        assert_eq!(
+            Command::parse("hexdump"),
+            Err(ParseError::MissingOperand {
+                command: "hexdump",
+                usage: USAGE_HEXDUMP
+            })
+        );
+        assert_eq!(
+            Command::parse("hexdump -C file"),
+            Err(ParseError::UnknownOption {
+                command: "hexdump",
+                option: "-C".to_string(),
+                usage: USAGE_HEXDUMP
+            })
+        );
+        assert_eq!(
+            Command::parse("sha256sum"),
+            Err(ParseError::MissingOperand {
+                command: "sha256sum",
+                usage: USAGE_SHA256SUM
+            })
+        );
+    }
+
+    #[test]
+    fn parses_decode_with_case_insensitive_type() {
+        assert_eq!(
+            Command::parse("decode hex 68656c6c6f").unwrap(),
+            Command::Decode {
+                encoding: Encoding::Hex,
+                value: "68656c6c6f".to_string()
+            }
+        );
+        assert_eq!(
+            Command::parse("decode BASE64 aGVsbG8=").unwrap(),
+            Command::Decode {
+                encoding: Encoding::Base64,
+                value: "aGVsbG8=".to_string()
+            }
+        );
+        // Quoted values survive tokenizing.
+        assert_eq!(
+            Command::parse("decode hex '68 65'").unwrap(),
+            Command::Decode {
+                encoding: Encoding::Hex,
+                value: "68 65".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_bad_decode_arguments() {
+        assert_eq!(
+            Command::parse("decode rot13 abc"),
+            Err(ParseError::UnknownEncoding("rot13".to_string()))
+        );
+        assert_eq!(
+            Command::parse("decode"),
+            Err(ParseError::MissingOperand {
+                command: "decode",
+                usage: USAGE_DECODE
+            })
+        );
+        assert_eq!(
+            Command::parse("decode hex"),
+            Err(ParseError::MissingOperand {
+                command: "decode",
+                usage: USAGE_DECODE
+            })
+        );
+        assert_eq!(
+            Command::parse("decode hex a b"),
+            Err(ParseError::TooManyArgs {
+                command: "decode",
+                usage: USAGE_DECODE
             })
         );
     }

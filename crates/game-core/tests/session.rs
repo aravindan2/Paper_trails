@@ -79,6 +79,42 @@ fn binary_artifact_is_inspected_safely_as_bytes() {
 }
 
 #[test]
+fn forensic_toolkit_examines_the_binary_artifact() {
+    let mut engine = GameEngine::case_001();
+
+    // Metadata, byte dump, printable runs, and a real SHA-256 digest.
+    assert_eq!(
+        run(&mut engine, "stat /opt/atlas/engine.bin"),
+        "  Path: /opt/atlas/engine.bin\n  Type: regular file\n  Size: 10 bytes\n  Permissions: 0755\n  Modified: 2024-10-27 22:00:00 UTC"
+    );
+    assert_eq!(
+        run(&mut engine, "hexdump /opt/atlas/engine.bin"),
+        "00000000  7f 45 4c 46 02 01 01 00  ff fe                    |.ELF......|"
+    );
+    // Default minimum (4) misses the 3-character run; -n 3 finds it.
+    assert_eq!(run(&mut engine, "strings /opt/atlas/engine.bin"), "");
+    assert_eq!(
+        run(&mut engine, "strings -n 3 /opt/atlas/engine.bin"),
+        "ELF"
+    );
+    // Digest cross-checked against system `sha256sum` for these bytes.
+    assert_eq!(
+        run(&mut engine, "sha256sum /opt/atlas/engine.bin"),
+        "f6a87668bcc94b9708ec03e72c7c12907dfc45edd944ddcaa8ac310a36485d18  /opt/atlas/engine.bin"
+    );
+
+    // Directories and text files work with stat too.
+    assert_eq!(
+        run(&mut engine, "stat /var/log"),
+        "  Path: /var/log\n  Type: directory\n  Size: -\n  Permissions: 0755\n  Modified: -"
+    );
+
+    // Decoding works end to end without touching the filesystem.
+    assert_eq!(run(&mut engine, "decode hex 434153452d303031"), "CASE-001");
+    assert_eq!(run(&mut engine, "decode base64 UkVDT1JERUQ="), "RECORDED");
+}
+
+#[test]
 fn malformed_input_is_reported_not_executed() {
     let mut engine = GameEngine::case_001();
     assert_eq!(

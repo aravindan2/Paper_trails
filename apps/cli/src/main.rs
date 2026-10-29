@@ -13,7 +13,7 @@ fn main() -> io::Result<()> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
-    println!("paper-trails — native CLI (Milestone 1)");
+    println!("paper-trails — native CLI (Milestone 2)");
     println!("{CASE_ID}: {CASE_TITLE} — recovered workstation image");
     println!("Type 'help' for commands. The simulated filesystem is separate from your real one.");
     println!();

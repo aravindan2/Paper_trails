@@ -3,6 +3,16 @@ name = "game-core"
 version = "0.1.0"
 edition = "2024"
 
-# No dependencies on purpose: Milestone 1 needs nothing beyond std, and the
-# engine must stay WASM-compatible (wasm32-unknown-unknown) later on.
 [dependencies]
+# `sha2` is the project's only dependency: it provides the *actual* SHA-256
+# digest for the `sha256sum` command (a simulated hash is explicitly not
+# allowed). Justification for adding it rather than hand-rolling:
+#   - correctness of a player-facing hash should not depend on code written
+#     here; RustCrypto's implementation is widely audited and covers the FIPS
+#     180-4 test vectors our tests pin against;
+#   - it is pure Rust (no C/asm, no JS glue), so it compiles for
+#     `wasm32-unknown-unknown` — verified in this repo with
+#     `cargo check -p game-core --target wasm32-unknown-unknown`;
+#   - default features are disabled: hashing byte slices needs neither `std`,
+#     `oid`, nor `alloc`, keeping the dependency graph minimal.
+sha2 = { version = "0.11", default-features = false }
