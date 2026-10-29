@@ -1,0 +1,6 @@
+{
+  "name": "paper-trails-web",
+  "private": true,
+  "type": "module",
+  "description": "Browser investigation interface for Paper Trails. Zero dependencies: no npm install is required; this file only tells Node that the .js files here are ES modules (for serve.js and test.js)."
+}

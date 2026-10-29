@@ -1,0 +1,35 @@
+# Representative command sequence shared by the native transcript test
+# (apps/wasm/tests/transcript.rs) and the JavaScript smoke test
+# (apps/wasm/smoke/smoke.js). One command per line; blank lines and lines
+# starting with '#' are ignored. Commands run in order against a single
+# session, so output is stateful (cwd, discoveries, report fields).
+#
+# Regenerate the matching expected.txt with:
+#   cargo run -q -p paper-trails-wasm --example transcript > apps/wasm/tests/fixtures/expected.txt
+
+pwd
+ls
+help
+cd var/log
+ls
+grep -n "Accepted password for elias" auth.log
+grep -n "OUT elias.voss" badge.log
+grep -n "export pipeline enabled" syslog
+cd /
+grep -n "enable nightly export for pilot partners" /home/elias/atlas-repo/.git/logs/HEAD
+ls /home/elias
+cat /opt/atlas/README.txt
+strings /opt/atlas/engine.bin
+stat /opt/atlas/engine.bin
+hexdump /opt/atlas/engine.bin
+sha256sum /opt/atlas/engine.bin
+decode hex 434153452d303031
+evidence
+timeline
+submit who someone
+submit did nothing yet
+submit why unknown
+submit
+cd ../..
+unknowncmd
+cat /nope

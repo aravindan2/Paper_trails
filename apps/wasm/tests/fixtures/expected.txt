@@ -1,0 +1,204 @@
+>>> pwd
+/
+=== end ===
+>>> ls
+etc/
+home/
+opt/
+var/
+=== end ===
+>>> help
+paper-trails — supported commands
+
+Navigation and inspection
+  help                     show this message
+  pwd                      print the current directory
+  ls [PATH]                list a directory (default: current directory)
+  cd [PATH]                change directory (bare `cd` returns to /)
+  cat PATH...              print text file contents
+  stat PATH                show size, permissions, and modification time
+
+Searching
+  grep [-n] PATTERN PATH   search one text file; -n prints line numbers
+
+Forensic tools
+  strings [-n LEN] PATH    printable ASCII runs (default minimum length: 4)
+  hexdump PATH             hex + ASCII dump, 16 bytes per row
+  sha256sum PATH           print the SHA-256 digest of a file
+  decode hex|base64 VALUE  decode hex or standard base64 text
+
+Investigation
+  evidence                   list recorded evidence and case objectives
+  timeline                   show dated evidence in chronological order
+  submit who|did|why TEXT    record a line of your final report
+  submit                     evaluate the report you have recorded
+
+Notes
+  - Every path lives inside the simulated case filesystem. The host
+    operating system is never read or executed.
+  - Observations are recorded when a command actually surfaces relevant
+    case content; run `evidence` to review your journal at any time.
+  - grep searches a single file (directories are not searched yet).
+  - Paths that climb above / with `..` are rejected as traversal attempts.
+  - Quotes group arguments, e.g.: grep -n "failed login" /var/log/auth.log
+  - decode prints valid UTF-8 as text; other bytes are shown explicitly,
+    e.g.: (bytes) 7f 45
+=== end ===
+>>> cd var/log
+=== end ===
+>>> ls
+auth.log
+badge.log
+syslog
+=== end ===
+>>> grep -n "Accepted password for elias" auth.log
+auth.log:7:Oct 27 23:47:12 atlas sshd[991]: Accepted password for elias from 203.0.113.77 port 44118 ssh2
+evidence recorded: EV-002 — Password login for elias from an external address
+=== end ===
+>>> grep -n "OUT elias.voss" badge.log
+badge.log:2:Oct 26 19:04:55 badge[311]: OUT elias.voss building=HQ
+badge.log:5:Oct 27 21:28:04 badge[311]: OUT elias.voss building=HQ
+evidence recorded: EV-001 — Badge exit after hours
+objective complete: OBJ-001 — Reconstruct the last movements of elias.voss
+=== end ===
+>>> grep -n "export pipeline enabled" syslog
+syslog:4:Oct 27 23:54:09 atlas kernel: atlasd[1201]: export pipeline enabled (endpoint=https://ingest.pinehill-partners.example/v1) uid=1001
+evidence recorded: EV-004 — Host reloaded with export enabled
+=== end ===
+>>> cd /
+=== end ===
+>>> grep -n "enable nightly export for pilot partners" /home/elias/atlas-repo/.git/logs/HEAD
+/home/elias/atlas-repo/.git/logs/HEAD:3:a3f19c22e7d54b81f0c6a93e52d71b4f80c6e17d 7c4e0b91a4d28f6e5b3c97d0f18a2e6c45d3b8a2 elias@atlas.example 1730073100 +0000	commit: config: enable nightly export for pilot partners (OPS-482)
+evidence recorded: EV-003 — Export enabled by commit 7c4e0b9
+=== end ===
+>>> ls /home/elias
+.fragment.b64
+atlas-repo/
+note.txt
+worklog.txt
+=== end ===
+>>> cat /opt/atlas/README.txt
+ATLAS RESEARCH SYSTEM — release 1.0 candidate notes
+Build: 0.9.3   Go-live: 2024-10-28 12:00 UTC
+
+Export pipeline: disabled for the 1.0 release (OPS-482).
+Compliance sign-off is required before export may be enabled.
+Source repository: /home/elias/atlas-repo
+evidence recorded: EV-006 — Release documentation declares export disabled
+objective complete: OBJ-002 — Identify the configuration change
+=== end ===
+>>> strings /opt/atlas/engine.bin
+atlas-engine 0.9.3-export
+export_enabled=1
+endpoint=https://ingest.pinehill-partners.example/v1
+built=2024-10-27T23:53:02Z
+evidence recorded: EV-005 — Executable contains enabled-export strings
+=== end ===
+>>> stat /opt/atlas/engine.bin
+  Path: /opt/atlas/engine.bin
+  Type: regular file
+  Size: 141 bytes
+  Permissions: 0755
+  Modified: 2024-10-27 23:53:31 UTC
+evidence recorded: EV-007 — Executable modified after the documented release
+objective complete: OBJ-003 — Account for the modified executable
+=== end ===
+>>> hexdump /opt/atlas/engine.bin
+00000000  7f 45 4c 46 02 01 01 00  ff fe 00 00 61 74 6c 61  |.ELF........atla|
+00000010  73 2d 65 6e 67 69 6e 65  20 30 2e 39 2e 33 2d 65  |s-engine 0.9.3-e|
+00000020  78 70 6f 72 74 00 01 ff  65 78 70 6f 72 74 5f 65  |xport...export_e|
+00000030  6e 61 62 6c 65 64 3d 31  00 7f 65 6e 64 70 6f 69  |nabled=1..endpoi|
+00000040  6e 74 3d 68 74 74 70 73  3a 2f 2f 69 6e 67 65 73  |nt=https://inges|
+00000050  74 2e 70 69 6e 65 68 69  6c 6c 2d 70 61 72 74 6e  |t.pinehill-partn|
+00000060  65 72 73 2e 65 78 61 6d  70 6c 65 2f 76 31 00 ff  |ers.example/v1..|
+00000070  62 75 69 6c 74 3d 32 30  32 34 2d 31 30 2d 32 37  |built=2024-10-27|
+00000080  54 32 33 3a 35 33 3a 30  32 5a 00 ff fe           |T23:53:02Z...|
+=== end ===
+>>> sha256sum /opt/atlas/engine.bin
+f91f7514a60e5832845a7b03e4227fd647ae02bf16993a6b5318f44666a7d944  /opt/atlas/engine.bin
+=== end ===
+>>> decode hex 434153452d303031
+CASE-001
+=== end ===
+>>> evidence
+CASE-001 evidence: 7 of 8
+
+EV-002  Password login for elias from an external address
+        sshd accepted a password login for elias from 203.0.113.77 at 23:47:12 — his only password login in the logs. Elias normally authenticates with a public key from 10.0.4.12, and his internal session had closed at 21:31.
+        source: /var/log/auth.log
+        related: EV-001, EV-003
+
+EV-001  Badge exit after hours
+        Badge reader records elias.voss leaving HQ at 21:28:04 on Oct 27 with no later entry — he never badged back in.
+        source: /var/log/badge.log
+        related: EV-002
+
+EV-004  Host reloaded with export enabled
+        syslog records the export pipeline enabled at 23:54:09 with endpoint ingest.pinehill-partners.example under uid=1001 (elias), right after atlas-build installed engine build 0.9.3-export at 23:53:31.
+        source: /var/log/syslog
+        related: EV-003, EV-005, EV-007
+
+EV-003  Export enabled by commit 7c4e0b9
+        The repository reflog shows commit 7c4e0b9 authored as elias@atlas.example at 23:51:40: "config: enable nightly export for pilot partners (OPS-482)" — the same ticket that had declared export disabled on Oct 26.
+        source: /home/elias/atlas-repo/.git/logs/HEAD
+        related: EV-002, EV-004, EV-006
+
+EV-006  Release documentation declares export disabled
+        Release 1.0 candidate notes state the export pipeline is disabled until compliance sign-off (OPS-482); README.txt was last modified 2024-10-26 09:14:02 UTC, matching the Oct 26 docs commit.
+        source: /opt/atlas/README.txt
+        related: EV-003, EV-005
+
+EV-005  Executable contains enabled-export strings
+        Printable strings in engine.bin include export_enabled=1 and endpoint=https://ingest.pinehill-partners.example/v1 — configuration that the release documentation declares disabled.
+        source: /opt/atlas/engine.bin
+        related: EV-004, EV-006, EV-007
+
+EV-007  Executable modified after the documented release
+        stat shows engine.bin modified at 2024-10-27 23:53:31 UTC — after the Oct 26 release notes and seconds before the export pipeline was enabled.
+        source: /opt/atlas/engine.bin
+        related: EV-004, EV-005
+
+Objectives:
+  [x] Reconstruct the last movements of elias.voss
+  [x] Identify the configuration change
+  [x] Account for the modified executable
+  [ ] Attribute the change to a person or account
+=== end ===
+>>> timeline
+CASE-001 timeline: 6 dated events
+2024-10-26 09:14:02 UTC  Release documentation declares export disabled  (/opt/atlas/README.txt)
+2024-10-27 21:28:04 UTC  Badge exit after hours  (/var/log/badge.log)
+2024-10-27 23:47:12 UTC  Password login for elias from an external address  (/var/log/auth.log)
+2024-10-27 23:51:40 UTC  Export enabled by commit 7c4e0b9  (/home/elias/atlas-repo/.git/logs/HEAD)
+2024-10-27 23:53:31 UTC  Executable modified after the documented release  (/opt/atlas/engine.bin)
+2024-10-27 23:54:09 UTC  Host reloaded with export enabled  (/var/log/syslog)
+=== end ===
+>>> submit who someone
+recorded who: someone
+=== end ===
+>>> submit did nothing yet
+recorded did: nothing yet
+=== end ===
+>>> submit why unknown
+recorded why: unknown
+=== end ===
+>>> submit
+CASE-001 report evaluation
+
+  evidence: 7 of 8 recorded (6 required — key observations missing)
+  who: does not match the evidence you have recorded
+  did: does not match the evidence you have recorded
+  why: does not match the evidence you have recorded
+
+  verdict: INCOMPLETE — revise your report and gather more evidence
+=== end ===
+>>> cd ../..
+cd: ../..: path escapes the virtual root
+=== end ===
+>>> unknowncmd
+unknown command: unknowncmd
+Type 'help' to list supported commands.
+=== end ===
+>>> cat /nope
+cat: /nope: No such file or directory
+=== end ===

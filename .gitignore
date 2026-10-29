@@ -4,3 +4,7 @@
 # the development machine only; tests/answer_key.rs may reference the same
 # facts because test code is never part of a browser bundle.
 authoring/
+
+# Generated JavaScript bindings (wasm-bindgen / wasm-pack output)
+apps/wasm/pkg/
+apps/wasm/web/pkg/

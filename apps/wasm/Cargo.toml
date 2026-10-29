@@ -1,0 +1,18 @@
+[package]
+name = "paper-trails-wasm"
+version = "0.1.0"
+edition = "2024"
+description = "WebAssembly adapter exposing the Paper Trails game engine to JavaScript"
+license = "MIT OR Apache-2.0"
+
+[lib]
+# The crate is a library: bundlers/`wasm-bindgen` consume it directly.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+game-core = { path = "../../crates/game-core" }
+
+# `wasm-bindgen` generates the JS<->WASM glue for the exported API. It is the
+# only added dependency; the adapter itself contains no game logic, and
+# `game-core` stays dependency-minimal (sha2 only).
+wasm-bindgen = "0.2"

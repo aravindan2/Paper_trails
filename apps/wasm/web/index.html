@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Paper Trails — Case 001: The Last Commit</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <h1>Paper Trails</h1>
+      <p class="case-label" id="case-label">Case 001</p>
+    </div>
+    <p class="intro">
+      Overnight, a data export on a production system was enabled without
+      authorization. You have read-only access to the affected host: its
+      logs, repository, and artifacts. Reconstruct what happened, record
+      your evidence, and file your report — who acted, what they did, and why.
+    </p>
+    <button type="button" class="btn btn-danger" id="reset-btn" disabled>
+      Reset investigation
+    </button>
+  </header>
+
+  <div class="banner banner-fatal" id="fatal-banner" role="alert" hidden></div>
+  <div class="banner banner-verdict" id="verdict-banner" role="status" hidden></div>
+
+  <main class="layout">
+    <section class="terminal-pane" aria-label="Terminal">
+      <div
+        class="terminal"
+        id="terminal"
+        role="log"
+        aria-label="Terminal output"
+        aria-live="off"
+        tabindex="0"
+      ></div>
+      <button type="button" class="btn jump-latest" id="jump-latest" hidden>
+        ↓ new output — jump to latest
+      </button>
+      <form class="prompt-bar" id="cmd-form" autocomplete="off">
+        <span class="prompt" id="prompt-cwd" aria-hidden="true">investigator:/$</span>
+        <label class="visually-hidden" for="cmd-input">Command input</label>
+        <input
+          id="cmd-input"
+          type="text"
+          name="command"
+          placeholder="type a command — help lists them"
+          spellcheck="false"
+          autocapitalize="off"
+          autocorrect="off"
+          aria-describedby="input-hint"
+          disabled
+        >
+        <span class="visually-hidden" id="input-hint">
+          Press Enter to execute. Arrow Up and Arrow Down recall command history.
+        </span>
+      </form>
+    </section>
+
+    <aside class="sidebar" aria-label="Case tools">
+      <section aria-labelledby="status-heading">
+        <h2 id="status-heading">Case status</h2>
+        <p class="status-line" id="status-line" aria-live="polite">Starting engine…</p>
+        <div class="tool-row">
+          <button type="button" class="btn" id="evidence-btn" disabled>Evidence</button>
+          <button type="button" class="btn" id="timeline-btn" disabled>Timeline</button>
+          <button type="button" class="btn" id="help-btn" disabled>Help</button>
+        </div>
+      </section>
+      <section aria-labelledby="inspector-heading">
+        <h2 id="inspector-heading">Inspector</h2>
+        <p class="inspector-caption" id="inspector-caption">
+          Evidence and Timeline open here.
+        </p>
+        <pre
+          class="inspector"
+          id="inspector"
+          tabindex="0"
+          role="region"
+          aria-labelledby="inspector-heading"
+        ></pre>
+      </section>
+    </aside>
+  </main>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
